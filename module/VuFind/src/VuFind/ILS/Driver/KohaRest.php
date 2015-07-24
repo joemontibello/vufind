@@ -25,7 +25,7 @@
  * @license  http://opensource.org/licenses/gpl-2.0.php GNU General Public License
  * @link     http://vufind.org/wiki/vufind2:building_an_ils_driver Wiki
  */
-namespace KatalogCT\ILS\Driver;
+namespace VuFind\ILS\Driver;
 use PDO, PDOException;
 use VuFind\Exception\ILS as ILSException;
 use VuFindHttp\HttpServiceInterface;
@@ -222,7 +222,8 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
         		';port=' . $this->config['Catalog']['port'] .
         		';dbname=' . $this->config['Catalog']['database'],
         		$this->config['Catalog']['username'],
-        		$this->config['Catalog']['password']
+        		$this->config['Catalog']['password'],
+                        [PDO::MYSQL_ATTR_INIT_COMMAND => 'SET NAMES utf8']
         );
         
         // Throw PDOExceptions if something goes wrong
@@ -527,8 +528,10 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
         try {
             //$needed_before_date = $this->toKohaDate($holdDetails['requiredBy']);
             $dateObject = \DateTime::createFromFormat("j. n. Y", $holdDetails['requiredBy']);
-            $needed_before_date = $dateObject->format("Y-m-d");
-        } catch (DateException $e) {
+            if(is_object($dateObject)) {
+                $needed_before_date = $dateObject->format("Y-m-d");
+            }
+        } catch (\Exception $e) {
             return array(
                 "success" => false,
                 "sysMessage" => "It seems you entered an invalid expiration date."
@@ -630,15 +633,17 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
       $loc = $shelf = '';
       $reserves = "N";
     
-      $sql = "select i.itemnumber as ITEMNO, i.location as LOCATION, i.holdingbranch as HLDBRNCH, 
+      $sql = "select i.itemnumber as ITEMNO, i.location, av.lib_opac AS LOCATION, i.holdingbranch as HLDBRNCH, 
       		i.homebranch as HOMEBRANCH, i.reserves as RESERVES, i.itemcallnumber as CALLNO, i.barcode as BARCODE, 
-      		i.barcode as COPYNO, i.notforloan as NOTFORLOAN, i.itemnotes as PERIONAME, b.frameworkcode as DOCTYPE,
+      		i.copynumber as COPYNO, i.notforloan as NOTFORLOAN, i.itemnotes as PERIONAME, b.frameworkcode as DOCTYPE,
       		t.frombranch as TRANSFERFROM, t.tobranch as TRANSFERTO
                     from items i join biblio b on i.biblionumber = b.biblionumber
                     left outer join (SELECT itemnumber, frombranch, tobranch from branchtransfers where datearrived IS NULL) as t on t.itemnumber = i.itemnumber
-                    where i.biblionumber = :id AND i.itemlost = '0' order by i.itemnumber DESC";
+                    left join authorised_values as av on i.location = av.authorised_value
+                    where i.biblionumber = :id AND i.itemlost = '0' AND av.category = 'LOC' order by i.itemnumber DESC";
      $sqlReserves = "select count(*) as RESERVESCOUNT from reserves WHERE biblionumber = :id AND found IS NULL";
      $sqlWaitingReserve = "select count(*) as WAITING from reserves WHERE itemnumber = :item_id and found = 'W'";
+     $sqlHoldings = "SELECT ExtractValue(( SELECT marcxml FROM biblioitems WHERE biblionumber = :id), '//datafield[@tag=\"866\"]/subfield[@code=\"a\"]') AS MFHD;";
       //var_dump($this->db);
       if (!$this->db) {
         $this->initDB();
@@ -649,6 +654,8 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
       	$sqlStmtReserves = $this->db->prepare($sqlReserves);
       	$sqlStmtWaitingReserve = $this->db->prepare($sqlWaitingReserve);
       	$sqlStmtReserves->execute(array(':id' => $id));
+        $sqlStmtHoldings = $this->db->prepare($sqlHoldings);
+        $sqlStmtHoldings->execute(array(':id' => $id));
       } catch (PDOException $e) {
         $this->debug('Connection failed: ' . $e->getMessage());
       }
@@ -656,7 +663,7 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
       if ($this->debug_enabled) {
         $this->debug("Rows count: " . $itemSqlStmt->rowCount());
       }
-      
+      $notes = $sqlStmtHoldings->fetch();
       $reservesRow = $sqlStmtReserves->fetch();	
       $reservesCount = $reservesRow["RESERVESCOUNT"];
       
@@ -691,9 +698,16 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
             $duedate = '';
             break;
         }
+
+        if($rowItem['LOCATION'] == 'INTERNET') {
+           $available = true;
+           $duedate = '';
+           $status = 'Available';
+        }
+
         
         
-        $duedate_formatted = date_format(new \DateTime($duedate), "j. n. Y");
+        $duedate_formatted = date_format(new \DateTime($duedate), "m/j/Y");
         
        
         //Retrieving the full branch name
@@ -701,10 +715,10 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
         	if($rowItem['HOMEBRANCH'] == null) {
         		$loc = "Unknown";
         	} else {
-        		$loc = $rowItem['HOMEBRANCH'];
+        		$loc = $rowItem['LOCATION'];
         	}
         } else {
-          	$loc = $rowItem['HLDBRNCH'];
+          	$loc = $rowItem['LOCATION'];
         }
 
         if($loc != "Unknown") {
@@ -725,7 +739,7 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
         	$branchSqlStmt->execute(array(':branch' => $rowItem["TRANSFERTO"]));
         	$rowTo = $branchSqlStmt->fetch();
         	$transferto = $rowTo ? $rowTo["BNAME"] : $rowItem["TRANSFERTO"];
-        	$status = "Na cestě z $transferfrom do $transferto";
+        	$status = "Na cest? z $transferfrom do $transferto";
         	$available = false;
         	$onTransfer = true;
         }
@@ -737,7 +751,10 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
         	$available = false;
         	$status = "Waiting";
         	$waiting = true;
+        } else {
+          $waiting = false;
         }
+
         
         $holding[] = array(
             'id'           => $id,
@@ -745,6 +762,7 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
             'item_id'      => $rowItem['ITEMNO'],
             'status'       => $status,
             'location'     => $loc,
+            'notes'        => $notes["MFHD"],
         	//'reserve'      => (null == $rowItem['RESERVES']) ? 'N' : $rowItem['RESERVES'],
         	'reserve'      => 'N',
             'callnumber'   => ((null == $rowItem['CALLNO']) || ($rowItem['DOCTYPE'] == "PE")) ? '' : $rowItem['CALLNO'],
@@ -815,7 +833,7 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
             'availability' => (string) $available,
             'item_id'      => $this->getField($item->{'itemnumber'}),
             'status'       => (string) $status,
-            'location'     => $this->getField($item->{'holdingbranchname'}),
+            'location'     => $this->getField($item->{'location'}),
             'reserve'      => (string) $reserves,
             'callnumber'   => $this->getField($item->{'itemcallnumber'}),
             'duedate'      => (string) $duedate,
@@ -832,7 +850,7 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
      * @param unknown $page - page number of results to retrieve (counting starts at 1)
      * @param unknown $limit - the size of each page of results to retrieve
      * @param unknown $daysOld - the maximum age of records to retrieve in days (maximum 30)
-     * @param string $fundId - optional fund ID to use for limiting results (use a value returned by getFunds, or exclude for no limit); note that “fund” may be a misnomer – if funds are not an appropriate way to limit your new item results, you can return a different set of values from getFunds. The important thing is that this parameter supports an ID returned by getFunds, whatever that may mean.
+     * @param string $fundId - optional fund ID to use for limiting results (use a value returned by getFunds, or exclude for no limit); note that ?fund? may be a misnomer ? if funds are not an appropriate way to limit your new item results, you can return a different set of values from getFunds. The important thing is that this parameter supports an ID returned by getFunds, whatever that may mean.
      */
     public function getNewItems($page, $limit, $daysOld, $fundId = null) {
 
@@ -1286,7 +1304,7 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
     /**
      * Get suppressed records.
      *
-    * @throws ILSException
+     * @throws ILSException
      * @return array ID numbers of suppressed records in the system.
      */
     public function getSuppressedRecords()
@@ -1295,13 +1313,171 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
  			  if (!$this->db) {
           $this->initDB();
       	}
+           $sql = "SELECT biblio.biblionumber AS biblionumber
+                      FROM biblioitems
+                      JOIN biblio ON ( biblioitems.biblionumber = biblio.biblionumber )
+                      WHERE ExtractValue( marcxml, '//datafield[@tag=\"942\"]/subfield[@code=\"n\"]' )
+                      IN ('Y', '1')";
         $sqlStmt = $this->db->prepare($sql);
-        $result = $sqlStmt->fetchAll(PDO::FETCH_COLUMN, 0);
+        $sqlStmt->execute();
+        $result = array();
+        foreach ($sqlStmt->fetchAll() as $rowItem) {
+           $result[] = $rowItem["biblionumber"];
+        }
       } catch (PDOException $e) {
         throw new ILSException($e->getMessage());
       }
       return $result;
     }
+
+    /**
+     * Get Departments
+     *
+     * @throws ILSException
+     * @return array An associative array with key = ID, value = dept. name.
+     */
+    public function getDepartments()
+    {
+      $deptList = [];
+
+      $sql = "SELECT DISTINCT department as abv, lib_opac AS DEPARTMENT 
+                 FROM courses
+                 INNER JOIN `authorised_values` ON courses.department = `authorised_values`.`authorised_value`";
+      try {
+          if (!$this->db) {
+             $this->initDB();
+      	  }
+        $sqlStmt = $this->db->prepare($sql);
+        $sqlStmt->execute();
+        $result = array();
+        foreach ($sqlStmt->fetchAll() as $rowItem) {
+           $deptList[$rowItem["abv"]] = $rowItem["DEPARTMENT"];
+        }
+      } catch (PDOException $e) {
+        throw new ILSException($e->getMessage());
+      }
+      return $deptList;
+    }
+
+
+    /**
+     * Get Instructors
+     *
+     * @throws ILSException
+     * @return array An associative array with key = ID, value = name.
+     */
+    public function getInstructors()
+    {
+      $instList = [];
+
+      $sql = "SELECT DISTINCT borrowernumber, CONCAT(firstname, ' ', surname) AS name 
+                 FROM course_instructors
+                 LEFT JOIN borrowers USING(borrowernumber)";
+
+      try {
+          if (!$this->db) {
+             $this->initDB();
+      	  }
+        $sqlStmt = $this->db->prepare($sql);
+        $sqlStmt->execute();
+        $result = array();
+        foreach ($sqlStmt->fetchAll() as $rowItem) {
+           $instList[$rowItem["borrowernumber"]] = $rowItem["name"];
+        }
+      } catch (PDOException $e) {
+        throw new ILSException($e->getMessage());
+      }
+      return $instList;
+    }
+
+    /**
+     * Get Courses
+     *
+     * @throws ILSException
+     * @return array An associative array with key = ID, value = name.
+     */
+    public function getCourses()
+    {
+      $courseList = [];
+
+      $sql = "SELECT course_id, CONCAT (course_number, ' - ', course_name) AS course
+                 FROM courses
+                 WHERE enabled = 1";
+      try {
+          if (!$this->db) {
+             $this->initDB();
+      	  }
+        $sqlStmt = $this->db->prepare($sql);
+        $sqlStmt->execute();
+        $result = array();
+        foreach ($sqlStmt->fetchAll() as $rowItem) {
+           $courseList[$rowItem["course_id"]] = $rowItem["course"];
+        }
+      } catch (PDOException $e) {
+        throw new ILSException($e->getMessage());
+      }
+      return $courseList;
+    }
+
+
+    /**
+     * Find Reserves
+     *
+     * Obtain information on course reserves.
+     *
+     * This version of findReserves was contributed by Matthew Hooper and includes
+     * support for electronic reserves (though eReserve support is still a work in
+     * progress).
+     *
+     * @param string $course ID from getCourses (empty string to match all)
+     * @param string $inst   ID from getInstructors (empty string to match all)
+     * @param string $dept   ID from getDepartments (empty string to match all)
+     *
+     * @throws ILSException
+     * @return array An array of associative arrays representing reserve items.
+     */
+    public function findReserves($course, $inst, $dept)
+    {
+        $recordList = [];
+        $reserveWhere = [];
+        $bindParams = [];
+        if ($course != '') {
+            $reserveWhere[] = "COURSE_ID = :course";
+            $bindParams[':course'] = $course;
+        }
+        if ($inst != '') {
+            $reserveWhere[] = "INSTRUCTOR_ID = :inst";
+            $bindParams[':inst'] = $inst;
+        }
+        if ($dept != '') {
+            $reserveWhere[] = "DEPARTMENT_ID = :dept";
+            $bindParams[':dept'] = $dept;
+        }
+        $reserveWhere = empty($reserveWhere) ?
+            "" : "where (" . implode(' AND ', $reserveWhere) . ")";
+
+$sql = "SELECT biblionumber AS `BIB_ID`,  courses.course_id AS COURSE_ID, course_instructors.borrowernumber as INSTRUCTOR_ID, courses.department AS DEPARTMENT_ID FROM courses
+INNER JOIN `authorised_values` ON courses.department = `authorised_values`.`authorised_value`
+INNER JOIN `course_reserves` ON courses.course_id = course_reserves.course_id
+INNER JOIN `course_items` ON course_reserves.ci_id = course_items.ci_id
+INNER JOIN `items` ON course_items.itemnumber = items.itemnumber
+INNER JOIN `course_instructors` ON `courses`.course_id = `course_instructors`.course_id
+INNER JOIN `borrowers` ON `course_instructors`.borrowernumber = borrowers.borrowernumber
+WHERE courses.enabled = 'yes'" . $reserveWhere;
+
+        try {
+            $sqlStmt = $this->db->prepare($sql, $bindParams);
+            $sqlStmt->execute();
+            $result = array();
+            foreach($sqlStmt->fetchAll() as $rowItem) {
+                $result[] = $rowItem;
+            }
+        } catch (PDOException $e) {
+            throw new ILSException($e->getMessage());
+        }
+        return $result;
+    }
+
 
     /**
      * Patron Login
@@ -1319,11 +1495,17 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
     {
         $patron = array();
 
+ //       $idObj = $this->makeRequest(
+   //         "AuthenticatePatron" . "&username=" . $username
+     //       . "&password=" . $password
+       // );
         $idObj = $this->makeRequest(
-            "AuthenticatePatron" . "&username=" . $username
-            . "&password=" . $password
+            "LookupPatron" . "&id=" . $username
+            . "&id_type=userid"
+
         );
         if ($this->debug_enabled) {
+            $this->debug("username: " . $username);
             $this->debug("Code: " . $idObj->{'code'});
             $this->debug("ID: " . $idObj->{'id'});
         }
