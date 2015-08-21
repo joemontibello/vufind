@@ -94,7 +94,7 @@ class UpgradeTest extends \VuFindTest\Unit\TestCase
         $this->assertTrue(isset($results['sms.ini']['Carriers']));
         $warnings = $upgrader->getWarnings();
 
-        // Prior to 1.3, we expect exactly one warning about using a non-blueprint
+        // Prior to 1.3, we expect exactly one warning about using a deprecated
         // theme:
         if ((float)$version < 1.3) {
             $this->assertEquals(1, count($warnings));
