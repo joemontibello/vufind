@@ -1,7 +1,7 @@
 <?php
 /**
  * KohaRest ILS Driver 
-*
+ *
  * PHP version 5
  *
  * Copyright (C) Alex Sassmannshausen, PTFS Europe 2014.
@@ -33,16 +33,19 @@ use Zend\Log\LoggerInterface;
 use VuFind\Exception\Date as DateException;
 
 /**
- * VuFind Driver for Koha, using web APIs (version: 0.1)
+ * VuFind Driver for Koha, using web APIs (version: 0.2)
  *
- * last updated: 05/13/2014
+ * last updated: 10/13/2015
+ * Minimum Koha Version: 3.18.6
  *
  * @category VuFind2
  * @package  ILS_Drivers
  * @author   Alex Sassmannshausen, <alex.sassmannshausen@ptfs-europe.com>
+ * @author   Tom Misilo, <misilot@fit.edu>
  * @license  http://opensource.org/licenses/gpl-2.0.php GNU General Public License
  * @link     http://vufind.org/wiki/vufind2:building_an_ils_driver Wiki
  */
+
 class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\HttpServiceAwareInterface,
     \Zend\Log\LoggerAwareInterface
 {
@@ -52,13 +55,6 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
      * @var string
      */
     protected $host;
-
-    /**
-     * Web services application path
-     *
-     * @var string
-     */
-    //protected $api_path = "/cgi-bin/koha/ilsdi.pl?service=";
 
     /**
      * ILS base URL
@@ -636,11 +632,11 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
       $sql = "select i.itemnumber as ITEMNO, i.location, av.lib_opac AS LOCATION, i.holdingbranch as HLDBRNCH, 
       		i.homebranch as HOMEBRANCH, i.reserves as RESERVES, i.itemcallnumber as CALLNO, i.barcode as BARCODE, 
       		i.copynumber as COPYNO, i.notforloan as NOTFORLOAN, i.itemnotes as PERIONAME, b.frameworkcode as DOCTYPE,
-      		t.frombranch as TRANSFERFROM, t.tobranch as TRANSFERTO
+      		t.frombranch as TRANSFERFROM, t.tobranch as TRANSFERTO, i.itemlost as ITEMLOST
                     from items i join biblio b on i.biblionumber = b.biblionumber
                     left outer join (SELECT itemnumber, frombranch, tobranch from branchtransfers where datearrived IS NULL) as t on t.itemnumber = i.itemnumber
                     left join authorised_values as av on i.location = av.authorised_value
-                    where i.biblionumber = :id AND i.itemlost = '0' AND av.category = 'LOC' order by i.itemnumber DESC";
+                    where i.biblionumber = :id AND av.category = 'LOC' order by i.itemnumber DESC";
      $sqlReserves = "select count(*) as RESERVESCOUNT from reserves WHERE biblionumber = :id AND found IS NULL";
      $sqlWaitingReserve = "select count(*) as WAITING from reserves WHERE itemnumber = :item_id and found = 'W'";
      $sqlHoldings = "SELECT ExtractValue(( SELECT marcxml FROM biblioitems WHERE biblionumber = :id), '//datafield[@tag=\"866\"]/subfield[@code=\"a\"]') AS MFHD;";
@@ -698,16 +694,25 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
             $duedate = '';
             break;
         }
-
-        if($rowItem['LOCATION'] == 'INTERNET') {
+        /*
+         * If the Item is in Location INTERNET or ONLINE, then the item is available
+         */
+        if($rowItem['LOCATION'] == 'INTERNET' || $rowItem['LOCATION'] == 'ONLINE') {
            $available = true;
            $duedate = '';
            $status = 'Available';
         }
 
+        // If Item is Lost or Missing, provide that status
+        if($rowItem['ITEMLOST'] > 0 ) {
+           $available = false;
+           $duedate = '01/01/2099';
+           $status = 'Lost/Missing';
+        }
+
         
         
-        $duedate_formatted = date_format(new \DateTime($duedate), "m/j/Y");
+        $duedate_formatted = date_format(new \DateTime($duedate), "m/d/Y");
         
        
         //Retrieving the full branch name
@@ -934,7 +939,7 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
             $sqlStmt->execute(array(':id' => $id));
             foreach ($sqlStmt->fetchAll() as $row) {
                 $transactionLst[] = array(
-                    'duedate' => date_format(new \DateTime($row['DUEDATE']), "j. n. Y"),
+                    'duedate' => date_format(new \DateTime($row['DUEDATE']), "m/d/Y"),
                     'id' => $row['BIBNO'],
                     'barcode' => $row['BARCODE'],
                     'renew' => $row['RENEWALS'],
@@ -1022,7 +1027,7 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
                 'location' => $this->getField($hold->{'branchname'}),
                 // FIXME: require exposure of reserves.expirationdate
                 'expire'   => "N/A",
-                'create'   => date_format(new \DateTime($this->getField($hold->{'reservedate'})), "j. n. Y"),
+                'create'   => date_format(new \DateTime($this->getField($hold->{'reservedate'})), "m/d/Y"),
                 'position' => $this->getField($hold->{'priority'}),
                 'title' => $this->getField($hold->{'title'}),
                 'available' => ($this->getField($hold->{'found'}) == "W")?true:false,
@@ -1169,7 +1174,7 @@ class KohaRest extends \VuFind\ILS\Driver\AbstractBase implements \VuFindHttp\Ht
         	}
 
         	$transactionLst[] = array(
-                'duedate'   => date_format(new \DateTime($this->getField($loan->{'date_due'})), "j. n. Y"),
+                'duedate'   => date_format(new \DateTime($this->getField($loan->{'date_due'})), "m/d/Y"),
                 'id'        => $this->getField($loan->{'biblionumber'}),
                 'item_id'   => $this->getField($loan->{'itemnumber'}),
                 'barcode'   => $this->getField($loan->{'barcode'}),
